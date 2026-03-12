@@ -8,7 +8,7 @@ An interactive spectrum viewer for Bruker timsTOF data (`.d` folders), built wit
 
 ## Download (Windows)
 
-👉 [Download v1.0.0 (zip)](https://www.dropbox.com/scl/fo/bvdf0d3xhpe0w2xefvnd2/ADhIJrF5SkFkGmwuMFR29r8?rlkey=hn3qazuitopqnxi9y0s02rti4&st=d87xlyhu&dl=1)
+👉 [Download v1.0.0 (zip)](https://www.dropbox.com/scl/fi/kw2oksd6295r0tvnuakao/timstof_spectrum_viewer_v1.0.0.zip?rlkey=yss57yq8s4azy3c5fctsa9ju4&st=h4ynqbfz&dl=1)
 
 Unzip and run `timstof_spectrum_viewer.exe`. No installation required.
 
