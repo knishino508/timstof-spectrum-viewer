@@ -1,0 +1,21 @@
+# Bruker timsTOF data
+*.d/
+
+# PyInstaller
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
