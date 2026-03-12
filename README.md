@@ -4,13 +4,19 @@ An interactive spectrum viewer for Bruker timsTOF data (`.d` folders), built wit
 
 ![Python](https://img.shields.io/badge/python-3.11-blue) ![License](https://img.shields.io/badge/license-GPLv3-green)
 
+---
 
+## Download (Windows)
 
-<img src="screenshot.png" alt="image-20260312232020861" style="zoom:50%;" />
+👉 [Download v1.0.0 (zip)](https://www.dropbox.com/scl/fo/bvdf0d3xhpe0w2xefvnd2/ADhIJrF5SkFkGmwuMFR29r8?rlkey=hn3qazuitopqnxi9y0s02rti4&st=d87xlyhu&dl=1)
+
+Unzip and run `timstof_spectrum_viewer.exe`. No installation required.
+
+> **Note:** Windows only. Python environment is not required for the exe version.
 
 ---
 
-## Features
+
 
 - **TIC / BPI chromatogram** — Click to jump to the nearest MS1 frame
 - **MS1 spectrum**
@@ -51,10 +57,10 @@ pip install pyqt6 pyqtgraph opentimspy numpy
 ## Usage
 
 ```bash
-python timstof_spectrum_viewer.py
+python spectrum_viewer_dia_5.py
 ```
 
-Click **"Load .d File"** and select a Bruker timsTOF `.d` directory. Both DDA and DIA datasets are supported and detected automatically.
+Click **"Open .d Folder"** and select a Bruker timsTOF `.d` directory. Both DDA and DIA datasets are supported and detected automatically.
 
 ---
 
@@ -86,7 +92,7 @@ Click **"Load .d File"** and select a Bruker timsTOF `.d` directory. Both DDA an
 
 Tested on:
 
-- Bruker timsTOF HT (PASEF, diaPASEF data)
+- Bruker timsTOF Pro (DDA, diaPASEF)
 
 Requires [opentimspy](https://github.com/MatteoLacki/opentimspy) for raw data access.
 
