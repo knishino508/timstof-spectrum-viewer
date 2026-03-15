@@ -60,7 +60,7 @@ pip install pyqt6 pyqtgraph opentimspy numpy
 ## Usage
 
 ```bash
-python spectrum_viewer_dia_5.py
+python timstof_spectrum_viewer.py
 ```
 
 Click **"Open .d Folder"** and select a Bruker timsTOF `.d` directory. Both DDA and DIA datasets are supported and detected automatically.
@@ -98,6 +98,18 @@ Tested on:
 - Bruker timsTOF Pro (DDA, diaPASEF)
 
 Requires [opentimspy](https://github.com/MatteoLacki/opentimspy) for raw data access.
+
+---
+
+## Development
+
+This project was developed by a timsTOF operator (non-engineer) with the assistance of AI.
+
+| Version | AI Model |
+|---------|----------|
+| v1.0.0 | Claude Sonnet 4.6 (Anthropic) |
+
+Code quality and functionality are best evaluated by actually running the tool.
 
 ---
 
