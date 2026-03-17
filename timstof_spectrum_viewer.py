@@ -978,20 +978,24 @@ class SpectrumViewer(QMainWindow):
         scan_offset = max(1, min(self.current_scan, n_scans))
         scan_num = scans_in_prec[scan_offset - 1]
 
-        # グレー背景: Precursor合算スペクトル
-        mz_all, int_all = self._get_ms2_spectrum(frame_id, sb, se)
+        # 全データを1回だけ取得
+        data = self.D.query(frame_id, columns=('scan', 'mz', 'intensity'))
+
+        # グレー背景: Precursor内の全Scanをそのまま重ね書き（合算なし）
+        bg_mask = (data['scan'] >= int(sb)) & (data['scan'] <= int(se))
+        mz_all  = data['mz'][bg_mask]
+        int_all = data['intensity'][bg_mask].astype(np.float64)
         if len(mz_all) > 0:
             self.ms2_plot.addItem(stem_item(mz_all, int_all, C_MS1_BG))
 
         # 赤前景: 現在Scan単体
-        data    = self.D.query(frame_id, columns=('scan', 'mz', 'intensity'))
-        mask    = data['scan'] == scan_num
+        mask = data['scan'] == scan_num
         mz_s    = data['mz'][mask]
         int_s   = data['intensity'][mask].astype(np.float64)
         if len(mz_s) > 0:
             self.ms2_plot.addItem(stem_item(mz_s, int_s, C_MS1_SCAN))
 
-        # スケール（Y軸はグレー背景の合算最大値基準）
+        # スケール（Y軸はグレー背景の全Scan中の最大値基準）
         if keep and saved_x is not None:
             self.ms2_plot.setXRange(saved_x[0], saved_x[1], padding=0)
             self.ms2_plot.setYRange(max(0, saved_y[0]), saved_y[1], padding=0)
@@ -1166,7 +1170,14 @@ class SpectrumViewer(QMainWindow):
             frame_id  = int(self.all_frame_ids[self.current_frame_idx])
             prec_list = self._get_ms2_precursors(frame_id)
             if prec_list:
-                entry = prec_list[self.current_scan - 1]
+                # Raw scan mode時はms2_raw_precursor_idx（0始まり）を使う
+                # 統合モード時はcurrent_scan - 1（0始まりに変換）
+                if self.settings.get('ms2_raw_mode', False):
+                    prec_idx = self.ms2_raw_precursor_idx
+                else:
+                    prec_idx = self.current_scan - 1
+                prec_idx = max(0, min(prec_idx, len(prec_list) - 1))
+                entry = prec_list[prec_idx]
                 key   = (frame_id, entry[0], entry[1])
                 if key not in self._band_keys:
                     self._band_keys.add(key)
@@ -1204,9 +1215,14 @@ class SpectrumViewer(QMainWindow):
         # ズームタイトル
         frame_id = int(self.all_frame_ids[self.current_frame_idx])
         prec_list = self._get_ms2_precursors(frame_id)
-        if prec_list and 0 < self.current_scan <= len(prec_list):
+        # Raw scan mode時はms2_raw_precursor_idx、統合モード時はcurrent_scan - 1
+        if self.settings.get('ms2_raw_mode', False):
+            zoom_prec_idx = self.ms2_raw_precursor_idx
+        else:
+            zoom_prec_idx = self.current_scan - 1
+        if prec_list and 0 <= zoom_prec_idx < len(prec_list):
             _, _, display_mz, mz_label, iso_mz, iso_w, ce, charge = \
-                self._unpack_precursor(prec_list[self.current_scan - 1])
+                self._unpack_precursor(prec_list[zoom_prec_idx])
             if self.acquisition_mode == 'DIA':
                 zoom_title = f"ISO zoom  Iso {iso_mz:.2f} \u00b1{half:.1f} Da"
             else:
@@ -1642,6 +1658,76 @@ class SpectrumViewer(QMainWindow):
         sb, se = prec_list[pidx][0], prec_list[pidx][1]
         return int(se) - int(sb) + 1
 
+    def _raw_prec_down(self):
+        """生モードでCtrl+↓: Precursor単位で次へ（常に先頭Scanで着地）。
+        現Precursor途中/先頭 → 次Precursor先頭。
+        現Precursor末尾      → 次フレームのWindow1/先頭Scanへ。"""
+        frame_id  = int(self.all_frame_ids[self.current_frame_idx])
+        prec_list = self._get_ms2_precursors(frame_id)
+        if not prec_list:
+            return
+        pidx = max(0, min(self.ms2_raw_precursor_idx, len(prec_list) - 1))
+
+        if pidx + 1 < len(prec_list):
+            # 次のPrecursor先頭へ（同フレーム内）
+            self.ms2_raw_precursor_idx = pidx + 1
+            self.current_scan = 1
+            self._redraw()
+            self._update_status()
+        else:
+            # フレーム末尾 → 次フレームへ
+            idx = self._next_frame(self.current_frame_idx)
+            if idx is not None:
+                next_type = int(self.all_frame_type[idx])
+                if next_type == 0:
+                    # 次がMS1 → そのMS1 ALL へ
+                    self._goto(idx, scan=0)
+                else:
+                    # 次がMS2（またはMS1をスキップして次MS2）→ Window1/Scan1へ
+                    ms2_idx = self._next_frame(self.current_frame_idx, 'ms2')
+                    if ms2_idx is not None:
+                        skip = ms2_idx != self.current_frame_idx + 1
+                        self.ms2_raw_precursor_idx = 0  # 必ずWindow1から開始
+                        self._goto(ms2_idx, scan=1, clear_bands=skip)
+
+    def _raw_prec_up(self):
+        """生モードでCtrl+↑: Precursor単位で前へ（常に先頭Scanで着地）。
+        現Precursor途中（scan>1） → 現Precursorの先頭Scanに戻る。
+        現Precursor先頭（scan=1） → 前Precursor先頭へ。
+        フレーム先頭              → 前フレームのWindow1/Scan1へ。"""
+        frame_id  = int(self.all_frame_ids[self.current_frame_idx])
+        prec_list = self._get_ms2_precursors(frame_id)
+        if not prec_list:
+            return
+        pidx = max(0, min(self.ms2_raw_precursor_idx, len(prec_list) - 1))
+
+        if self.current_scan > 1:
+            # 同Precursor内の先頭Scanに戻す
+            self.current_scan = 1
+            self._redraw()
+            self._update_status()
+        elif pidx > 0:
+            # 前のPrecursor先頭へ（同フレーム内）
+            self.ms2_raw_precursor_idx = pidx - 1
+            self.current_scan = 1
+            self._redraw()
+            self._update_status()
+        else:
+            # フレーム先頭 → 前フレームへ
+            idx = self._prev_frame(self.current_frame_idx)
+            if idx is not None:
+                prev_type = int(self.all_frame_type[idx])
+                if prev_type == 0:
+                    # 前がMS1 → そのMS1 ALL へ
+                    self._goto(idx, scan=0)
+                else:
+                    # 前がMS2（またはMS1をスキップして前MS2）→ Window1/Scan1へ
+                    ms2_idx = self._prev_frame(self.current_frame_idx, 'ms2')
+                    if ms2_idx is not None:
+                        skip = ms2_idx != self.current_frame_idx - 1
+                        self.ms2_raw_precursor_idx = 0  # 必ずWindow1から開始
+                        self._goto(ms2_idx, scan=1, clear_bands=skip)
+
     def _raw_scan_down(self):
         """生モードで↓: 次Scan → Precursor末尾で次Precursor先頭 → 次フレーム先頭。"""
         frame_id  = int(self.all_frame_ids[self.current_frame_idx])
@@ -1772,7 +1858,7 @@ class SpectrumViewer(QMainWindow):
                                 self._goto(idx, scan=1, clear_bands=skip)
                     else:
                         if self.settings.get('ms2_raw_mode', False):
-                            self._raw_scan_down()
+                            self._raw_prec_down()
                         else:
                             frame_id  = int(self.all_frame_ids[self.current_frame_idx])
                             prec_list = self._get_ms2_precursors(frame_id)
@@ -1852,7 +1938,7 @@ class SpectrumViewer(QMainWindow):
                                 self._goto(idx, scan=max(1, len(precs)), clear_bands=skip)
                     else:
                         if self.settings.get('ms2_raw_mode', False):
-                            self._raw_scan_up()
+                            self._raw_prec_up()
                         elif self.current_scan > 1:
                             # MS2内はprecursor移動（↑と同じ）
                             self._goto(self.current_frame_idx,

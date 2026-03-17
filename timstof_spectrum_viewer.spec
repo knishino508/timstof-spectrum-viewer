@@ -4,7 +4,7 @@
 # PyInstaller用specファイル
 #
 # ビルド方法:
-#   pyinstaller timsTOF_viewer.spec
+#   pyinstaller timstof_spectrum_viewer.spec
 
 import os, importlib
 
@@ -22,7 +22,7 @@ datas = [
 block_cipher = None
 
 a = Analysis(
-    ['spectrum_viewer_dia_3.py'],
+    ['timstof_spectrum_viewer.py'],
     pathex=[],
     binaries=[],
     datas=datas,
