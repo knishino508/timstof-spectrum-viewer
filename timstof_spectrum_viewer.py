@@ -25,10 +25,12 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLabel, QSplitter, QStatusBar,
-    QGroupBox, QCheckBox, QFrame, QSlider, QComboBox
+    QGroupBox, QCheckBox, QFrame, QSlider, QComboBox,
+    QListWidget, QListWidgetItem, QLineEdit, QSizePolicy,
+    QRadioButton, QButtonGroup, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
+from PyQt6.QtGui import QKeyEvent, QShortcut, QKeySequence
 import pyqtgraph as pg
 
 
@@ -100,7 +102,6 @@ class SettingsPanel(QWidget):
 
     def __init__(self, settings: dict, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(220)
         self.setStyleSheet("background: #f5f5f5;")
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -206,6 +207,375 @@ class SettingsPanel(QWidget):
 
 
 # ================================================================
+#  MS2 List Panel
+# ================================================================
+class _NoScrollListWidget(QListWidget):
+    """クリック時に先読みスクロールを抑制するQListWidget。"""
+    def __init__(self, on_mouse_press, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._on_mouse_press = on_mouse_press
+
+    def mousePressEvent(self, event):
+        self._on_mouse_press()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self._on_mouse_press()  # リリース後もフラグをリセット
+
+
+class MS2ListPanel(QWidget):
+    """MS2スペクトル一覧パネル。上部フィルター + 下部リスト。"""
+
+    # シグナル: クリックされたエントリを通知 (frame_idx, prec_scan)
+    entry_selected = pyqtSignal(int, int)
+    # シグナル: Filterボタンが押された (mz_center_str, rt_center_str, intensity_min)
+    update_requested = pyqtSignal(str, str, float)
+    # シグナル: ページ変更時にTIC範囲を通知 (rt_min, rt_max)
+    page_changed = pyqtSignal(float, float)
+
+    FIELD_STYLE = """
+        QLineEdit {
+            border: 1px solid #bbb;
+            border-radius: 3px;
+            padding: 2px 4px;
+            background: white;
+            font-size: 11px;
+        }
+        QLineEdit:focus {
+            border: 1px solid #1565C0;
+        }
+    """
+    BTN_STYLE = """
+        QPushButton {
+            background: #1565C0;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            padding: 4px 0px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        QPushButton:hover  { background: #1976D2; }
+        QPushButton:pressed{ background: #0D47A1; }
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet("background: #f5f5f5;")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        # ── タイトル ──────────────────────────────────────────────
+        title = QLabel("☰ MS2 List")
+        title.setStyleSheet("font-weight: bold; font-size: 13px; color: #333;")
+        root.addWidget(title)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #ccc;")
+        root.addWidget(sep)
+
+        # ── フィルターグループ（上段1割） ─────────────────────────
+        filter_group = QGroupBox("Filter")
+        filter_group.setStyleSheet("QGroupBox { font-size: 11px; }")
+        fl = QVBoxLayout(filter_group)
+        fl.setSpacing(4)
+
+        # m/z フィルター
+        mz_label = QLabel("Precursor m/z")
+        mz_label.setStyleSheet("font-size: 10px; color: #555;")
+        fl.addWidget(mz_label)
+
+        mz_row = QHBoxLayout()
+        mz_row.setSpacing(4)
+        self.mz_center = QLineEdit()
+        self.mz_center.setPlaceholderText("例: 584.3 or 500:700")
+        self.mz_center.setStyleSheet(self.FIELD_STYLE)
+        self.mz_center.returnPressed.connect(self._on_update)
+        mz_row.addWidget(self.mz_center)
+        fl.addLayout(mz_row)
+
+        # RT フィルター
+        rt_label = QLabel("RT (min)")
+        rt_label.setStyleSheet("font-size: 10px; color: #555;")
+        fl.addWidget(rt_label)
+
+        rt_row = QHBoxLayout()
+        rt_row.setSpacing(4)
+        self.rt_center = QLineEdit()
+        self.rt_center.setPlaceholderText("例: 10.5 or 5:15")
+        self.rt_center.setStyleSheet(self.FIELD_STYLE)
+        self.rt_center.returnPressed.connect(self._on_update)
+        rt_row.addWidget(self.rt_center)
+        fl.addLayout(rt_row)
+
+        # Intensity フィルター（トグルボタン風ラジオボタン）
+        int_label = QLabel("Intensity (min)")
+        int_label.setStyleSheet("font-size: 10px; color: #555;")
+        fl.addWidget(int_label)
+
+        TOGGLE_STYLE = """
+            QRadioButton {
+                font-size: 10px;
+                color: #555;
+                spacing: 0px;
+                padding: 2px 6px;
+                border: 1px solid #bbb;
+                border-radius: 3px;
+                background: #f5f5f5;
+            }
+            QRadioButton:checked {
+                color: white;
+                background: #1565C0;
+                border: 1px solid #1565C0;
+            }
+            QRadioButton:hover {
+                border: 1px solid #1565C0;
+                background: #e3f0ff;
+            }
+            QRadioButton:checked:hover {
+                background: #1976D2;
+            }
+            QRadioButton::indicator {
+                width: 0px;
+                height: 0px;
+                image: none;
+                border: none;
+                background: none;
+            }
+        """
+
+        self._int_btn_group = QButtonGroup(self)
+        self._int_thresholds = [
+            ("ALL",  0),
+            (">1e4", 1e4),
+            (">1e5", 1e5),
+            (">1e6", 1e6),
+        ]
+        int_row = QHBoxLayout()
+        int_row.setSpacing(3)
+        for i, (label, val) in enumerate(self._int_thresholds):
+            rb = QRadioButton(label)
+            rb.setStyleSheet(TOGGLE_STYLE)
+            rb.setChecked(i == 0)
+            rb.toggled.connect(self._on_update)
+            self._int_btn_group.addButton(rb, i)
+            int_row.addWidget(rb)
+        int_row.addStretch()
+        fl.addLayout(int_row)
+
+        root.addWidget(filter_group)
+
+        # ── ヘッダー行 ─────────────────────────────────────────────
+        hdr = QLabel(" Inten.     RT(m)  m/z         z   1/K₀")
+        hdr.setStyleSheet("font-size: 10px; color: #666; font-family: monospace;")
+        root.addWidget(hdr)
+
+        # ── リスト（1列・高速描画） ────────────────────────────────
+        self.list_widget = _NoScrollListWidget(self._on_mouse_event)
+        self.list_widget.setStyleSheet("""
+            QListWidget {
+                font-size: 11px;
+                font-family: monospace;
+                border: 1px solid #ccc;
+                background: white;
+            }
+            QListWidget::item {
+                padding: 2px 4px;
+                border-bottom: 1px solid #eee;
+            }
+            QListWidget::item:selected {
+                background: #BBDEFB;
+                color: #0D47A1;
+            }
+            QListWidget::item:hover {
+                background: #E3F2FD;
+            }
+        """)
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
+        self.list_widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.list_widget.currentItemChanged.connect(self._on_current_item_changed)
+        # Enterキーで選択中アイテムにジャンプ
+        enter_sc = QShortcut(QKeySequence(Qt.Key.Key_Return), self.list_widget)
+        enter_sc.activated.connect(self._on_enter_pressed)
+        enter_sc2 = QShortcut(QKeySequence(Qt.Key.Key_Enter), self.list_widget)
+        enter_sc2.activated.connect(self._on_enter_pressed)
+        self.list_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        root.addWidget(self.list_widget, stretch=1)
+
+        # ── ページネーション ───────────────────────────────────────
+        page_row = QHBoxLayout()
+        page_row.setSpacing(2)
+
+        BTN_STYLE_SM = self.BTN_STYLE + "QPushButton { padding: 2px 5px; font-size: 11px; }"
+
+        self.prev10_btn = QPushButton("<<")
+        self.prev_btn   = QPushButton("<")
+        self.next_btn   = QPushButton(">")
+        self.next10_btn = QPushButton(">>")
+
+        for btn in (self.prev10_btn, self.prev_btn, self.next_btn, self.next10_btn):
+            btn.setFixedHeight(22)
+            btn.setFixedWidth(28)
+            btn.setStyleSheet(self.BTN_STYLE)
+
+        self.prev10_btn.clicked.connect(lambda: self._on_jump_page(-10))
+        self.prev_btn.clicked.connect(lambda: self._on_jump_page(-1))
+        self.next_btn.clicked.connect(lambda: self._on_jump_page(1))
+        self.next10_btn.clicked.connect(lambda: self._on_jump_page(10))
+
+        self.page_label = QLabel("")
+        self.page_label.setStyleSheet("font-size: 10px; color: #555;")
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        page_row.addWidget(self.prev10_btn)
+        page_row.addWidget(self.prev_btn)
+        page_row.addWidget(self.page_label, stretch=1)
+        page_row.addWidget(self.next_btn)
+        page_row.addWidget(self.next10_btn)
+        root.addLayout(page_row)
+
+        # エントリ数表示
+        self.count_label = QLabel("")
+        self.count_label.setStyleSheet("font-size: 10px; color: #888;")
+        root.addWidget(self.count_label)
+
+        # 内部データ
+        self._entries       = []
+        self._page          = 0       # 現在ページ（0始まり）
+        self._clicked       = False   # クリック中フラグ（先読みスクロール抑制用）
+        self.PAGE_SIZE      = 5000
+
+    # ── 公開API ───────────────────────────────────────────────────
+    def set_entries(self, entries: list):
+        """ms2_index（list of dict）をセットして1ページ目を表示する。"""
+        self._entries = entries
+        self._page    = 0
+        self._show_page()
+
+    def clear(self):
+        self._entries = []
+        self._page    = 0
+        self.list_widget.clear()
+        self.count_label.setText("")
+        self.page_label.setText("")
+        for btn in (self.prev10_btn, self.prev_btn, self.next_btn, self.next10_btn):
+            btn.setEnabled(False)
+        self.page_changed.emit(0.0, 0.0)
+
+    def show_building_message(self):
+        """インデックス構築中メッセージをリスト欄に表示する。"""
+        self.list_widget.clear()
+        item = QListWidgetItem("  MS2 index 構築中...")
+        item.setForeground(pg.mkColor('#888888'))
+        self.list_widget.addItem(item)
+        self.count_label.setText("")
+        self.page_label.setText("")
+
+    # ── 内部 ──────────────────────────────────────────────────────
+    def _on_update(self):
+        """Enterキー/ラジオボタン変更: フィルター値をシグナルで通知する。"""
+        checked_id = self._int_btn_group.checkedId()
+        int_min = self._int_thresholds[checked_id][1] if checked_id >= 0 else 0
+        self.update_requested.emit(
+            self.mz_center.text().strip(),
+            self.rt_center.text().strip(),
+            float(int_min),
+        )
+
+    def _on_jump_page(self, delta: int):
+        """ページをdelta分移動する（負=前、正=次）。"""
+        total_pages = max(1, (len(self._entries) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+        new_page = max(0, min(self._page + delta, total_pages - 1))
+        if new_page != self._page:
+            self._page = new_page
+            self._show_page()
+
+    def _show_page(self):
+        """現在ページのエントリを描画してページUI・TIC範囲を更新する。"""
+        n      = len(self._entries)
+        ps     = self.PAGE_SIZE
+        start  = self._page * ps
+        end    = min(start + ps, n)
+        page_entries = self._entries[start:end]
+
+        self._populate(page_entries)
+
+        # ページUI更新
+        total_pages = max(1, (n + ps - 1) // ps)
+        self.page_label.setText(f"{self._page + 1} / {total_pages}")
+        self.prev_btn.setEnabled(self._page > 0)
+        self.prev10_btn.setEnabled(self._page > 0)
+        self.next_btn.setEnabled(self._page < total_pages - 1)
+        self.next10_btn.setEnabled(self._page < total_pages - 1)
+        self.count_label.setText(
+            f"{start + 1:,}–{end:,} / {n:,} entries"
+        )
+
+        # TIC範囲シグナル: RT順先頭・末尾をそのまま使う（計算不要）
+        if page_entries:
+            rt_min = page_entries[0]['rt']
+            rt_max = page_entries[-1]['rt']
+            self.page_changed.emit(rt_min, rt_max)
+        else:
+            self.page_changed.emit(0.0, 0.0)
+
+    def _populate(self, entries: list):
+        """エントリリストをQListWidgetに1行テキストで表示する。"""
+        self.list_widget.clear()
+        for e in entries:
+            intensity  = e.get('intensity', float('nan'))
+            rt         = e.get('rt',        float('nan'))
+            mz         = e.get('mz',        float('nan'))
+            ch         = e.get('charge',    0)
+            im         = e.get('im',        float('nan'))
+            charge_str = f"{ch}+" if ch > 0 else "?"
+            int_str    = f"{intensity:.1e}" if not np.isnan(intensity) else " n/a  "
+            text = f"{int_str}  {rt:5.2f}  {mz:9.4f}  {charge_str:<3} {im:.3f}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, e)
+            self.list_widget.addItem(item)
+
+    def _on_mouse_event(self):
+        """マウス操作中は先読みスクロールを抑制する。"""
+        self._clicked = True
+        QTimer.singleShot(0, lambda: setattr(self, '_clicked', False))
+
+    def _on_item_clicked(self, item: QListWidgetItem):
+        """クリック: そのエントリにジャンプする。"""
+        e = item.data(Qt.ItemDataRole.UserRole)
+        if e is not None:
+            self.entry_selected.emit(e['frame_idx'], e['prec_scan'])
+
+    def _on_enter_pressed(self):
+        """Enterキー: 現在選択中のアイテムにジャンプ。"""
+        item = self.list_widget.currentItem()
+        if item:
+            self._on_item_clicked(item)
+
+    def _on_current_item_changed(self, current: QListWidgetItem, previous):
+        """選択変更時: クリック以外（キーボード移動）のみ3行先読みスクロール。"""
+        if current is None or self._clicked:
+            return
+        total = self.list_widget.count()
+        curr_row = self.list_widget.row(current)
+        prev_row = self.list_widget.row(previous) if previous else curr_row
+
+        offset = 3 if curr_row >= prev_row else -3
+        target_row = max(0, min(curr_row + offset, total - 1))
+        target_item = self.list_widget.item(target_row)
+        if target_item:
+            self.list_widget.scrollToItem(
+                target_item, QAbstractItemView.ScrollHint.EnsureVisible
+            )
+
+
+# ================================================================
+# ================================================================
 #  描画ヘルパー
 # ================================================================
 def stem_item(mz, intensity, color, width=1.0):
@@ -263,6 +633,7 @@ class SpectrumViewer(QMainWindow):
         self.all_frame_tic      = None
         self.all_frame_bpi      = None
         self.pasef_info         = {}       # {frame_id: [entry, ...]}
+        self.ms2_index          = None      # None=未構築, list=構築済み
         self.acquisition_mode   = 'Unknown'
         self.ms2_frame_type_val = 8
         self.global_mz_min      = None
@@ -344,7 +715,15 @@ class SpectrumViewer(QMainWindow):
         self.settings_btn.setCheckable(True)
         self.settings_btn.clicked.connect(self._toggle_settings)
         toolbar.addWidget(self.settings_btn)
-        toolbar.addSpacing(12)
+        toolbar.addSpacing(4)
+
+        self.ms2list_btn = QPushButton("☰ MS2 List")
+        self.ms2list_btn.setFixedWidth(90)
+        self.ms2list_btn.setCheckable(True)
+        self.ms2list_btn.setEnabled(False)
+        self.ms2list_btn.clicked.connect(self._toggle_ms2list)
+        toolbar.addWidget(self.ms2list_btn)
+        toolbar.addSpacing(8)
 
         hint = QLabel("←→:Frame  Ctrl+←→:MS1  ↓↑:Scan  Ctrl+↓↑:MS1scan skip  ESC:ALL  TIC:click")
         hint.setStyleSheet("color: #888; font-size: 11px;")
@@ -353,7 +732,11 @@ class SpectrumViewer(QMainWindow):
 
         # ── メインエリア ────────────────────────────────────────────
         main_area = QHBoxLayout()
-        main_area.setSpacing(4)
+        main_area.setSpacing(0)
+        main_area.setContentsMargins(0, 0, 0, 0)
+
+        # スペクトルエリアとサイドパネルを水平Splitterで分割
+        self.h_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
 
@@ -371,6 +754,16 @@ class SpectrumViewer(QMainWindow):
             pen=pg.mkPen(color='r', width=1.5, style=Qt.PenStyle.DashLine)
         )
         self.tic_plot.addItem(self.vline)
+        # MS2 Listのページ範囲をTICに薄赤で表示
+        self.page_region = pg.LinearRegionItem(
+            values=[0, 1],
+            brush=pg.mkBrush(150, 150, 150, 60),
+            pen=pg.mkPen(120, 120, 120, 120, width=1),
+            movable=False
+        )
+        self.page_region.setZValue(5)
+        self.page_region.setVisible(False)
+        self.tic_plot.addItem(self.page_region)
         self.tic_plot.scene().sigMouseClicked.connect(self._on_tic_clicked)
         splitter.addWidget(tic_w)
 
@@ -446,12 +839,26 @@ class SpectrumViewer(QMainWindow):
         splitter.addWidget(row3)
 
         splitter.setSizes([180, 300, 300])
-        main_area.addWidget(splitter)
+        self.h_splitter.addWidget(splitter)
 
         self.settings_panel = SettingsPanel(self.settings)
         self.settings_panel.hide()
         self.settings_panel.changed.connect(self._on_settings_changed)
-        main_area.addWidget(self.settings_panel)
+        self.h_splitter.addWidget(self.settings_panel)
+
+        self.ms2list_panel = MS2ListPanel()
+        self.ms2list_panel.hide()
+        self.ms2list_panel.entry_selected.connect(self._on_ms2list_entry_selected)
+        self.ms2list_panel.update_requested.connect(self._on_ms2list_update)
+        self.ms2list_panel.page_changed.connect(self._on_ms2list_page_changed)
+        self.h_splitter.addWidget(self.ms2list_panel)
+
+        # スペクトルエリアを優先的に広げる
+        self.h_splitter.setStretchFactor(0, 1)
+        self.h_splitter.setStretchFactor(1, 0)
+        self.h_splitter.setStretchFactor(2, 0)
+
+        main_area.addWidget(self.h_splitter)
 
         root.addLayout(main_area)
         self.status = QStatusBar()
@@ -486,7 +893,141 @@ class SpectrumViewer(QMainWindow):
     #  Settings
     # ================================================================
     def _toggle_settings(self, checked):
+        """Settingsパネルをトグル。MS2 Listと排他。"""
+        if checked:
+            self.ms2list_panel.hide()
+            self.ms2list_btn.setChecked(False)
         self.settings_panel.setVisible(checked)
+
+    def _toggle_ms2list(self, checked):
+        """MS2 Listパネルをトグル。Settingsと排他。
+        表示時はRaw scan modeを強制的にOFFにする。
+        初回表示時はインデックス構築メッセージを出してから全件表示する。"""
+        if checked:
+            self.settings_panel.hide()
+            self.settings_btn.setChecked(False)
+            # Raw scan modeを強制OFF
+            if self.settings.get('ms2_raw_mode', False):
+                self.settings['ms2_raw_mode'] = False
+                self.settings_panel.chk_ms2_raw_mode.setChecked(False)
+                if self.D is not None and self.current_type == 'ms2':
+                    self._switch_ms2_mode(False)
+            self.ms2list_panel.setVisible(True)
+            # 初回のみ：構築中メッセージを表示してから構築→全件表示
+            if self.ms2_index is None:
+                self.ms2list_panel.show_building_message()
+                QApplication.processEvents()
+                self._build_ms2_index()
+                self.ms2list_panel.set_entries(self.ms2_index)
+        else:
+            self.ms2list_panel.setVisible(False)
+            self.page_region.setVisible(False)  # TIC範囲を非表示
+
+    def _on_ms2list_page_changed(self, rt_min: float, rt_max: float):
+        """ページ切り替え時にTICの薄灰色範囲を更新する。"""
+        if rt_min == 0.0 and rt_max == 0.0:
+            self.page_region.setVisible(False)
+            return
+        self.page_region.setRegion([rt_min, rt_max])
+        self.page_region.setVisible(True)
+
+    def _on_ms2list_entry_selected(self, frame_idx: int, prec_scan: int):
+        """MS2 Listでエントリがクリックされたときにそのフレームへジャンプ。
+        _goto()を呼んだあと、直前MS1フレームを探してMS1パネルを明示的に再描画する。
+        """
+        if self.D is None:
+            return
+
+        # まずMS2フレームへジャンプ（通常通り）
+        self._goto(frame_idx, scan=prec_scan)
+
+        # 直前MS1フレームを探す
+        ms1_idx = None
+        for i in range(frame_idx - 1, -1, -1):
+            if int(self.all_frame_type[i]) == 0:
+                ms1_idx = i
+                break
+
+        if ms1_idx is None:
+            return
+
+        # MS1パネルだけ直前MS1フレームの内容で再描画する
+        # current_frame_idxはMS2のまま変えない
+        saved_frame_idx  = self.current_frame_idx
+        saved_type       = self.current_type
+        saved_scan       = self.current_scan
+
+        self.current_frame_idx = ms1_idx
+        self.current_type      = 'ms1'
+        self.current_scan      = 0      # ALL表示
+        self._redraw_ms1()
+        self._update_vline()    # TIC赤線を直前MS1のRT位置に移動
+
+        # 状態をMS2に戻す
+        self.current_frame_idx = saved_frame_idx
+        self.current_type      = saved_type
+        self.current_scan      = saved_scan
+
+        # 黄色バーとズームパネルを再描画
+        self._redraw_ms1_for_ms2()
+
+    def _on_ms2list_update(self, mz_text: str, rt_text: str, int_min: float = 0):
+        """MS2 List Filter: ms2_indexにフィルターをかけてリストを更新する。
+        インデックス未構築の場合は何もしない（初回構築は_toggle_ms2listが担当）。
+        入力形式:
+          単一値  "584.3"   → 中央値 ± 20ppm (m/z) / ±10min (RT)
+          範囲    "500:700" → 500以上700以下
+        """
+        if self.D is None or self.ms2_index is None:
+            return
+
+        entries = self.ms2_index
+
+        # Intensityフィルター（ラジオボタン）
+        if int_min > 0:
+            entries = [e for e in entries if e.get('intensity', 0) >= int_min]
+
+        # m/zフィルター（単一値: ±20 ppm、範囲: min:max）
+        if mz_text:
+            if ':' in mz_text:
+                try:
+                    lo, hi = mz_text.split(':', 1)
+                    mz_lo, mz_hi = float(lo.strip()), float(hi.strip())
+                    entries = [e for e in entries if mz_lo <= e['mz'] <= mz_hi]
+                except ValueError:
+                    self.status.showMessage("MS2 List: m/z の範囲指定が無効です（例: 500:700）")
+                    return
+            else:
+                try:
+                    mz_center = float(mz_text)
+                    ppm_half  = mz_center * 20e-6
+                    entries = [e for e in entries
+                               if abs(e['mz'] - mz_center) <= ppm_half]
+                except ValueError:
+                    self.status.showMessage("MS2 List: m/z に無効な値が入力されています")
+                    return
+
+        # RTフィルター（単一値: ±10 min、範囲: min:max）
+        if rt_text:
+            if ':' in rt_text:
+                try:
+                    lo, hi = rt_text.split(':', 1)
+                    rt_lo, rt_hi = float(lo.strip()), float(hi.strip())
+                    entries = [e for e in entries if rt_lo <= e['rt'] <= rt_hi]
+                except ValueError:
+                    self.status.showMessage("MS2 List: RT の範囲指定が無効です（例: 5:15）")
+                    return
+            else:
+                try:
+                    rt_center = float(rt_text)
+                    entries = [e for e in entries
+                               if abs(e['rt'] - rt_center) <= 10.0]
+                except ValueError:
+                    self.status.showMessage("MS2 List: RT に無効な値が入力されています")
+                    return
+
+        self.ms2list_panel.set_entries(entries)
+        self.status.showMessage(f"MS2 List: {len(entries):,} entries")
 
     def _on_settings_changed(self):
         prev_acc     = self.settings.get('accumulate_bands', False)
@@ -603,7 +1144,7 @@ class SpectrumViewer(QMainWindow):
 
     @staticmethod
     def _unpack_precursor(entry):
-        sb, se, mono_mz, largest_mz, avg_mz, iso_mz, iso_w, ce, charge = entry
+        sb, se, mono_mz, largest_mz, avg_mz, iso_mz, iso_w, ce, charge, prec_int = entry
         if not np.isnan(mono_mz):
             return sb, se, mono_mz, "mono", iso_mz, iso_w, ce, charge
         elif not np.isnan(largest_mz):
@@ -1350,6 +1891,9 @@ class SpectrumViewer(QMainWindow):
 
         self.tic_plot.addItem(self.vline)
         self.vline.setZValue(10)
+        # page_regionもclear()で消えるので再追加（vlineの下に置く）
+        self.tic_plot.addItem(self.page_region)
+        self.page_region.setZValue(5)
         self.tic_plot.setXRange(
             self.all_frame_rt[0], self.all_frame_rt[-1], padding=0.01)
         self.tic_plot.autoRange()
@@ -1468,6 +2012,80 @@ class SpectrumViewer(QMainWindow):
             f"  |  ←→: Frame  Ctrl+←→: MS1  ↓↑: Scan  Ctrl+↓↑: MS1scan skip")
 
     # ================================================================
+    #  MS2インデックス構築・MS2 Listロジック
+    # ================================================================
+    def _build_ms2_index(self):
+        """pasef_infoからms2_indexをフラットリストとして構築する。
+        scan_to_inv_ion_mobilityを全Precursor分まとめて1回呼ぶことで高速化。
+        """
+        frame_id_to_idx = {int(fid): i for i, fid in enumerate(self.all_frame_ids)}
+
+        frame_idxs = []
+        prec_scans = []
+        rts        = []
+        mzs        = []
+        charges    = []
+        intensities= []
+        mid_scans  = []
+        frame_ids  = []
+
+        for frame_id, entries in self.pasef_info.items():
+            fidx = frame_id_to_idx.get(frame_id)
+            if fidx is None:
+                continue
+            rt = float(self.all_frame_rt[fidx])
+
+            for prec_scan, entry in enumerate(entries, start=1):
+                sb, se, mono_mz, largest_mz, avg_mz, iso_mz, iso_w, ce, charge, prec_int = entry
+
+                if not np.isnan(mono_mz):
+                    mz = mono_mz
+                elif not np.isnan(largest_mz):
+                    mz = largest_mz
+                elif not np.isnan(avg_mz):
+                    mz = avg_mz
+                else:
+                    mz = iso_mz
+
+                frame_idxs.append(fidx)
+                prec_scans.append(prec_scan)
+                rts.append(rt)
+                mzs.append(float(mz))
+                charges.append(int(charge))
+                intensities.append(float(prec_int))
+                mid_scans.append((int(sb) + int(se)) // 2)
+                frame_ids.append(frame_id)
+
+        if not frame_idxs:
+            self.ms2_index = []
+            return
+
+        # IM変換: 全件まとめて1回呼ぶ
+        try:
+            all_im = self.D.scan_to_inv_ion_mobility(
+                np.array(mid_scans, dtype=np.int32),
+                np.array(frame_ids,  dtype=np.int32),
+            ).tolist()
+        except Exception:
+            all_im = [float('nan')] * len(frame_idxs)
+
+        index = [
+            {
+                'frame_idx': frame_idxs[i],
+                'prec_scan': prec_scans[i],
+                'rt':        rts[i],
+                'mz':        mzs[i],
+                'charge':    charges[i],
+                'intensity': intensities[i],
+                'im':        all_im[i],
+            }
+            for i in range(len(frame_idxs))
+        ]
+
+        index.sort(key=lambda e: (e['rt'], e['mz']))
+        self.ms2_index = index
+
+    # ================================================================
     #  ファイル読み込み
     # ================================================================
     def load_file(self):
@@ -1512,19 +2130,21 @@ class SpectrumViewer(QMainWindow):
                 cur.execute("""
                     SELECT pf.Frame, pf.ScanNumBegin, pf.ScanNumEnd,
                            pf.IsolationMz, pf.IsolationWidth, pf.CollisionEnergy,
-                           p.MonoisotopicMz, p.LargestPeakMz, p.AverageMz, p.Charge
+                           p.MonoisotopicMz, p.LargestPeakMz, p.AverageMz, p.Charge,
+                           p.Intensity
                     FROM PasefFrameMsMsInfo pf
                     JOIN Precursors p ON pf.Precursor = p.Id
                     ORDER BY pf.Frame, pf.ScanNumBegin
                 """)
                 for row in cur.fetchall():
-                    fid, sb, se, iso_mz, iso_w, ce, mono_mz, largest_mz, avg_mz, ch = row
+                    fid, sb, se, iso_mz, iso_w, ce, mono_mz, largest_mz, avg_mz, ch, prec_int = row
                     def _f(v): return float(v) if v is not None else float('nan')
                     self.pasef_info.setdefault(int(fid), []).append((
                         int(sb), int(se),
                         _f(mono_mz), _f(largest_mz), _f(avg_mz),
                         _f(iso_mz), _f(iso_w), _f(ce),
-                        int(ch) if ch is not None else 0
+                        int(ch) if ch is not None else 0,
+                        _f(prec_int)
                     ))
 
             elif 'DiaFrameMsMsInfo' in db_tables:
@@ -1579,6 +2199,23 @@ class SpectrumViewer(QMainWindow):
                     plot.setXRange(self.global_mz_min, self.global_mz_max, padding=0)
                     plot.setLimits(xMin=self.global_mz_min, xMax=self.global_mz_max)
                     plot.vb.disableAutoRange(axis='x')
+
+            # ── パネルリセット（新ファイル読み込み時） ────────────────
+            self.settings_panel.hide()
+            self.settings_btn.setChecked(False)
+            self.ms2list_panel.hide()
+            self.ms2list_panel.clear()
+            self.ms2list_btn.setChecked(False)
+
+            # DDAのみMS2インデックスを構築（初回Updateまで遅延）
+            self.ms2_index = None
+
+            # DDAのみMS2 Listボタンを有効化
+            is_dda = (self.acquisition_mode == 'DDA')
+            self.ms2list_btn.setEnabled(is_dda)
+            self.ms2list_btn.setToolTip(
+                "" if is_dda else f"MS2 List is only available for DDA data ({self.acquisition_mode})"
+            )
 
             self._draw_tic()
 
