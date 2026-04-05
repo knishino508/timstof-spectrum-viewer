@@ -2166,7 +2166,8 @@ class SpectrumViewer(QMainWindow):
                         self.pasef_info.setdefault(int(fid), []).append((
                             sb, se,
                             float('nan'), float('nan'), float('nan'),
-                            iso_mz, iso_w, ce, 0
+                            iso_mz, iso_w, ce, 0,
+                            float('nan')  # prec_int（DIAには存在しないためnan）
                         ))
             else:
                 self.acquisition_mode   = 'MS1Only'

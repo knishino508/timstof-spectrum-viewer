@@ -15,7 +15,7 @@ An interactive spectrum viewer for Bruker timsTOF data (`.d` folders), built wit
 
 ## Download (Windows)
 
-👉 [Download v1.1.0 (zip)](https://www.dropbox.com/scl/fi/4a0ukhptxm16fov1zgqr0/timstof_spectrum_viewer_v1.1.0.zip?rlkey=xho7d26dhcnxfq5174rru80j2&st=pj6p8f9b&dl=1)
+👉 [Download v1.1.1 (zip)](https://www.dropbox.com/scl/fi/nzay0s8r845n2nk27ejyi/timstof_spectrum_viewer_v1.1.1.zip?rlkey=8p8sauef5rv5dyc7zdo5r61ua&st=ulz2tl21&dl=1)
 
 Unzip and run `timstof_spectrum_viewer.exe`. No installation required.
 
@@ -129,7 +129,7 @@ Available for DDA datasets only. Click the **☰ MS2 List** button in the toolba
 
 Tested on:
 
-- Bruker timsTOF Pro (DDA, diaPASEF)
+- Bruker timsTOF Pro (PASEF, diaPASEF) , timsTOF HT (PASEF, diaPASEF)
 
 Requires [opentimspy](https://github.com/MatteoLacki/opentimspy) for raw data access.
 
